@@ -42,6 +42,7 @@ from vllm.entrypoints.openai.api_server import (
 
 from utils.metrics import VllmStatLoggerFactory
 from utils.request import EmbedRequest, GenerateRequest
+from utils.vllm_backend_utils import engine_warmup
 
 _VLLM_ENGINE_ARGS_FILENAME = "model.json"
 _MULTI_LORA_ARGS_FILENAME = "multi_lora.json"
@@ -273,6 +274,11 @@ class TritonPythonModel:
             ) as engine:
                 # Capture the engine event loop and make it visible to other threads.
                 self._event_loop = asyncio.get_running_loop()
+
+                if self._get_bool_config_param("ENABLE_ENGINE_WARMUP"):
+                    self.logger.log_info(f"Warming up engine for {self.args['model_name']}...")
+                    model_config = await engine.get_model_config()
+                    await engine_warmup(engine, model_config.task, getattr(self, 'lora_repository', None))
 
                 # Signal the engine is started and make it visible to other threads.
                 with self._llm_engine_start_cv:
