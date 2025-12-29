@@ -33,6 +33,7 @@ from typing import Callable, Dict, List, Optional
 import numpy as np
 import triton_python_backend_utils as pb_utils
 from PIL import Image
+from vllm.config import ModelConfig
 from vllm.inputs.data import TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
@@ -44,7 +45,7 @@ from vllm.outputs import (
 from vllm.pooling_params import PoolingParams
 from vllm.utils import random_uuid
 
-from utils.vllm_backend_utils import TritonSamplingParams
+from utils.vllm_backend_utils import AnyTokenizer, TritonSamplingParams, get_conversation_prompt
 
 
 class RequestBase:
@@ -81,6 +82,8 @@ class GenerateRequest(RequestBase):
         logger,
         lora_repository: Optional[Dict[str, str]] = None,
         supported_loras: Optional[List[str]] = None,
+        tokenizer: Optional[AnyTokenizer] = None,
+        model_config: Optional[ModelConfig] = None,
     ):
         super().__init__(request, executor_callback, output_dtype, logger)
         # Attributes for generate requests
@@ -88,6 +91,8 @@ class GenerateRequest(RequestBase):
             self.lora_repository = lora_repository
         if supported_loras is not None:
             self.supported_loras = supported_loras
+        self.tokenizer = tokenizer
+        self.model_config = model_config
 
     def _get_input_tensors(self):
         # prompt
@@ -96,6 +101,30 @@ class GenerateRequest(RequestBase):
         ).as_numpy()[0]
         if isinstance(prompt, bytes):
             prompt = prompt.decode("utf-8")
+
+        # Check if prompt is a chat conversation (JSON list)
+        if self.tokenizer and self.model_config:
+            try:
+                prompt_json = json.loads(prompt)
+                if isinstance(prompt_json, list):
+                    # Check for tools
+                    tools = None
+                    tools_tensor = pb_utils.get_input_tensor_by_name(self.triton_request, "tools")
+                    if tools_tensor:
+                        tools_str = tools_tensor.as_numpy()[0]
+                        if isinstance(tools_str, bytes):
+                            tools_str = tools_str.decode("utf-8")
+                        tools = json.loads(tools_str)
+
+                    prompt = get_conversation_prompt(
+                        prompt_json,
+                        self.tokenizer,
+                        self.model_config,
+                        tools=tools
+                    )
+            except (json.JSONDecodeError, TypeError):
+                # Not a JSON list, treat as standard text prompt
+                pass
 
         # image
         images = pb_utils.get_input_tensor_by_name(self.triton_request, "image")

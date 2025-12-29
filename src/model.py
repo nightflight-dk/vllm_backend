@@ -460,6 +460,8 @@ class TritonPythonModel:
         try:
             request_task_name = self._validate_request_task_name(request)
             if request_task_name == "generate":
+                tokenizer = await self._llm_engine.get_tokenizer()
+                model_config = await self._llm_engine.get_model_config()
                 if self.enable_lora:
                     request = GenerateRequest(
                         request,
@@ -468,6 +470,8 @@ class TritonPythonModel:
                         self.logger,
                         self.lora_repository,
                         self.supported_loras,
+                        tokenizer=tokenizer,
+                        model_config=model_config,
                     )
                 else:
                     request = GenerateRequest(
@@ -475,6 +479,8 @@ class TritonPythonModel:
                         self._llm_engine.generate,
                         self.output_dtype,
                         self.logger,
+                        tokenizer=tokenizer,
+                        model_config=model_config,
                     )
             elif request_task_name == "embed":
                 request = EmbedRequest(

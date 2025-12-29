@@ -25,9 +25,26 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 import json
-from typing import Optional
+from typing import Any, Dict, List, Optional, Union, cast
 
+from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+from vllm.config import ModelConfig
+from vllm.entrypoints.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
+    apply_hf_chat_template,
+    apply_mistral_chat_template,
+    parse_chat_messages,
+    resolve_chat_template_content_format,
+)
+from vllm.inputs import TokensPrompt
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.transformers_utils.tokenizer_base import TokenizerBase
+from vllm.transformers_utils.tokenizers import MistralTokenizer
+
+AnyTokenizer = Union[
+    PreTrainedTokenizer, PreTrainedTokenizerFast, TokenizerBase, MistralTokenizer
+]
 
 
 class TritonSamplingParams(SamplingParams):
@@ -98,3 +115,78 @@ class TritonSamplingParams(SamplingParams):
                 f"[vllm] Was trying to create `TritonSamplingParams`, but got exception: {e}"
             )
             return None
+
+def get_conversation_prompt(
+    messages: list,
+    tokenizer: AnyTokenizer,
+    model_config: ModelConfig,
+    chat_template: str = None,
+    chat_template_content_format: ChatTemplateContentFormatOption = "auto",
+    add_generation_prompt: bool = True,
+    continue_final_message: bool = False,
+    tools: Optional[list[dict[str, Any]]] = None,
+    multi_modal_data: Optional[dict[str, Any]] = None,
+    mm_processor_kwargs: Optional[dict[str, Any]] = None,
+) -> TokensPrompt:
+    """
+    This function generates a vLLM conversation prompt based on the input messages.
+    """
+    
+    msgs = cast(List[ChatCompletionMessageParam], messages)
+
+    resolved_content_format = resolve_chat_template_content_format(
+        chat_template,
+        tools,
+        chat_template_content_format,
+        tokenizer,
+        model_config=model_config
+    )
+
+    # Handle multimodal content in messages
+    conversation, mm_data, _ = parse_chat_messages(
+        msgs,
+        model_config,
+        tokenizer,
+        content_format=resolved_content_format,
+    )
+    
+    # If external multi_modal_data is provided, merge it with parsed data
+    if mm_data is None:
+        mm_data = multi_modal_data
+    elif multi_modal_data is not None:
+        mm_data.update(multi_modal_data)
+
+    if isinstance(tokenizer, MistralTokenizer):
+        prompt_token_ids = apply_mistral_chat_template(
+            tokenizer,
+            messages=msgs,
+            chat_template=chat_template,
+            tools=tools,
+            add_generation_prompt=add_generation_prompt,
+            continue_final_message=continue_final_message,
+        )
+    else:
+        prompt_str = apply_hf_chat_template(
+            tokenizer,
+            trust_remote_code=model_config.trust_remote_code,
+            conversation=conversation,
+            chat_template=chat_template,
+            tools=tools,
+            model_config=model_config,
+            add_generation_prompt=add_generation_prompt,
+            continue_final_message=continue_final_message,
+        )
+        # Special tokens are already included in chat templates so
+        # should not be added by the tokenizer in this case.
+        prompt_token_ids = tokenizer.encode(prompt_str,
+                                          add_special_tokens=False)
+
+    prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
+
+    if mm_data is not None:
+        prompt["multi_modal_data"] = mm_data
+
+    if mm_processor_kwargs is not None:
+        prompt["mm_processor_kwargs"] = mm_processor_kwargs
+
+    return prompt
