@@ -46,6 +46,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.utils import random_uuid
 
 from utils.vllm_backend_utils import TritonSamplingParams
+from utils.request_metrics import TritonVLLMRequestMetrics
 
 
 class RewardEmbeddingOutput:
@@ -87,6 +88,7 @@ class RequestBase:
         truncation_strategy=None,
         max_model_len=None,
         correlation_id=None,
+        parallel_config=None,
     ):
         self.triton_request = request
         self.executor_callback = executor_callback
@@ -97,6 +99,7 @@ class RequestBase:
         self.max_model_len = max_model_len
         self.id = random_uuid()
         self.correlation_id = correlation_id
+        self.parallel_config = parallel_config
         self.stream = False
         self.prepend_input = False
 
@@ -146,6 +149,7 @@ class GenerateRequest(RequestBase):
         truncation_strategy=None,
         max_model_len=None,
         correlation_id=None,
+        parallel_config=None,
     ):
         super().__init__(
             request,
@@ -156,6 +160,7 @@ class GenerateRequest(RequestBase):
             truncation_strategy,
             max_model_len,
             correlation_id,
+            parallel_config,
         )
         # Attributes for generate requests
         if lora_repository is not None:
@@ -378,6 +383,18 @@ class GenerateRequest(RequestBase):
                 )
             )
 
+        # metrics
+        if request_output.finished:
+            triton_metrics = TritonVLLMRequestMetrics.for_vllm_request_output(
+                request_output, self.parallel_config
+            )
+            output_tensors.append(
+                pb_utils.Tensor(
+                    "metrics",
+                    np.asarray([triton_metrics.to_json()], dtype=self.output_dtype),
+                )
+            )
+
         return pb_utils.InferenceResponse(output_tensors=output_tensors)
 
 
@@ -392,6 +409,7 @@ class EmbedRequest(RequestBase):
         truncation_strategy=None,
         max_model_len=None,
         correlation_id=None,
+        parallel_config=None,
     ):
         super().__init__(
             request,
@@ -402,6 +420,7 @@ class EmbedRequest(RequestBase):
             truncation_strategy,
             max_model_len,
             correlation_id,
+            parallel_config,
         )
 
     def _get_input_tensors(self):
@@ -500,6 +519,18 @@ class EmbedRequest(RequestBase):
                 pb_utils.Tensor("num_output_tokens", np.asarray(0, dtype=np.uint32))
             )
 
+        # metrics
+        if request_output.finished:
+            triton_metrics = TritonVLLMRequestMetrics.for_vllm_request_output(
+                request_output, self.parallel_config
+            )
+            output_tensors.append(
+                pb_utils.Tensor(
+                    "metrics",
+                    np.asarray([triton_metrics.to_json()], dtype=self.output_dtype),
+                )
+            )
+
         return pb_utils.InferenceResponse(output_tensors=output_tensors)
 
 class ScoreRequest(RequestBase):
@@ -513,6 +544,7 @@ class ScoreRequest(RequestBase):
         truncation_strategy=None,
         max_model_len=None,
         correlation_id=None,
+        parallel_config=None,
     ):
         super().__init__(
             request,
@@ -523,6 +555,7 @@ class ScoreRequest(RequestBase):
             truncation_strategy,
             max_model_len,
             correlation_id,
+            parallel_config,
         )
 
     def _get_input_tensors(self):
@@ -660,6 +693,18 @@ class ScoreRequest(RequestBase):
         if self.additional_outputs["return_num_output_tokens"]:
             output_tensors.append(
                 pb_utils.Tensor("num_output_tokens", np.asarray(0, dtype=np.uint32))
+            )
+
+        # metrics
+        if request_output.finished:
+            triton_metrics = TritonVLLMRequestMetrics.for_vllm_request_output(
+                request_output, self.parallel_config
+            )
+            output_tensors.append(
+                pb_utils.Tensor(
+                    "metrics",
+                    np.asarray([triton_metrics.to_json()], dtype=self.output_dtype),
+                )
             )
 
         return pb_utils.InferenceResponse(output_tensors=output_tensors)

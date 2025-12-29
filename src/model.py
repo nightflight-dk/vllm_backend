@@ -42,7 +42,9 @@ from vllm.entrypoints.openai.api_server import (
 
 from utils.metrics import VllmStatLoggerFactory
 from utils.request import EmbedRequest, GenerateRequest, ScoreRequest
+from utils.request_metrics import TritonVLLMRequestMetrics
 from utils.vllm_backend_utils import SupportedVLLMTask
+from vllm.config import ParallelConfig
 
 _VLLM_ENGINE_ARGS_FILENAME = "model.json"
 _MULTI_LORA_ARGS_FILENAME = "multi_lora.json"
@@ -132,6 +134,12 @@ class TritonPythonModel:
                 "dims": [1],
                 "optional": True,
             },
+            {
+                "name": "metrics",
+                "data_type": "TYPE_STRING",
+                "dims": [1],
+                "optional": True,
+            },
             # Tentative input reserved for embedding requests in OpenAI-compatible frontend. Subject to change in the future.
             # WARN: Triton client should never set this input. It is reserved for embedding requests in OpenAI-compatible frontend.
             {
@@ -155,6 +163,7 @@ class TritonPythonModel:
             {"name": "logprobs", "data_type": "TYPE_STRING", "dims": [-1]},
             {"name": "num_input_tokens", "data_type": "TYPE_UINT32", "dims": [1]},
             {"name": "num_output_tokens", "data_type": "TYPE_UINT32", "dims": [-1]},
+            {"name": "metrics", "data_type": "TYPE_STRING", "dims": [1]},
         ]
 
         # Collect input and output names from the provided model config.
@@ -207,6 +216,14 @@ class TritonPythonModel:
         self._init_engine_args()
         self.max_model_len = self._aync_engine_args.max_model_len
         self.truncation_strategy = self._get_truncation_strategy()
+        
+        # Setup parallel config for metrics
+        self.parallel_config = ParallelConfig(
+            pipeline_parallel_size=self._aync_engine_args.pipeline_parallel_size,
+            tensor_parallel_size=self._aync_engine_args.tensor_parallel_size,
+            worker_use_ray=self._aync_engine_args.worker_use_ray,
+            max_parallel_loading_workers=self._aync_engine_args.max_parallel_loading_workers,
+        )
 
         # Check if metrics are enabled. The ZMQ process cannot be used when metrics are
         # enabled.
