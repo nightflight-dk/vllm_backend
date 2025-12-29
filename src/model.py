@@ -134,6 +134,12 @@ class TritonPythonModel:
                 "dims": [1],
                 "optional": True,
             },
+            {
+                "name": "query_input",
+                "data_type": "TYPE_STRING",
+                "dims": [1],
+                "optional": True,
+            },
         ]
         # Outputs expected by the backend.
         outputs = [
@@ -162,6 +168,19 @@ class TritonPythonModel:
             if output["name"] not in output_names:
                 auto_complete_model_config.add_output(output)
 
+    def _get_truncation_strategy(self):
+        parameters = self.model_config.get("parameters", {})
+        strategy = parameters.get("TRUNCATION_STRATEGY", {}).get("string_value", None)
+        if strategy is None:
+            # Try boolean
+            strategy_bool = parameters.get("TRUNCATION_STRATEGY", {}).get(
+                "string_value", "false"
+            )
+            if strategy_bool.lower() == "true":
+                return True
+            return False
+        return strategy
+
     def initialize(self, args):
         self.args = args
         self.logger = pb_utils.Logger
@@ -180,6 +199,8 @@ class TritonPythonModel:
         # Initialize engine arguments
         # TODO: Move this into _init_engine(), after moving check metrics enabled.
         self._init_engine_args()
+        self.max_model_len = self._aync_engine_args.max_model_len
+        self.truncation_strategy = self._get_truncation_strategy()
 
         # Check if metrics are enabled. The ZMQ process cannot be used when metrics are
         # enabled.
@@ -194,6 +215,22 @@ class TritonPythonModel:
 
         # Starting the vLLM engine and its event thread running the AsyncIO event loop.
         self._init_engine()
+
+        # Get tokenizer
+        try:
+            self.tokenizer = self._llm_engine.engine.tokenizer
+        except AttributeError:
+            try:
+                self.tokenizer = self._llm_engine.get_tokenizer()
+                if asyncio.iscoroutine(self.tokenizer):
+                    self.tokenizer = asyncio.run_coroutine_threadsafe(
+                        self.tokenizer, self._event_loop
+                    ).result()
+            except Exception:
+                self.logger.log_warning(
+                    "Could not retrieve tokenizer. Truncation will be disabled."
+                )
+                self.tokenizer = None
 
         # Starting the response thread. It allows vLLM to keep making progress while
         # response sender(s) are sending responses to server frontend.
@@ -487,6 +524,9 @@ class TritonPythonModel:
                         self.logger,
                         self.lora_repository,
                         self.supported_loras,
+                        tokenizer=self.tokenizer,
+                        truncation_strategy=self.truncation_strategy,
+                        max_model_len=self.max_model_len,
                     )
                 else:
                     request = GenerateRequest(
@@ -494,14 +534,29 @@ class TritonPythonModel:
                         self._llm_engine.generate,
                         self.output_dtype,
                         self.logger,
+                        tokenizer=self.tokenizer,
+                        truncation_strategy=self.truncation_strategy,
+                        max_model_len=self.max_model_len,
                     )
             elif request_task_name == "embed":
                 request = EmbedRequest(
-                    request, self._llm_engine.encode, self.output_dtype, self.logger
+                    request,
+                    self._llm_engine.encode,
+                    self.output_dtype,
+                    self.logger,
+                    tokenizer=self.tokenizer,
+                    truncation_strategy=self.truncation_strategy,
+                    max_model_len=self.max_model_len,
                 )
             elif request_task_name in ["score", "classify", "reward"]:
                 request = ScoreRequest(
-                    request, self._llm_engine.encode, self.output_dtype, self.logger
+                    request,
+                    self._llm_engine.encode,
+                    self.output_dtype,
+                    self.logger,
+                    tokenizer=self.tokenizer,
+                    truncation_strategy=self.truncation_strategy,
+                    max_model_len=self.max_model_len,
                 )
             else:
                 raise ValueError(

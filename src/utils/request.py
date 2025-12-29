@@ -78,15 +78,45 @@ class RewardRequestOutput(EmbeddingRequestOutput):
 
 class RequestBase:
     def __init__(
-        self, request, executor_callback: Callable, output_dtype: np.dtype, logger
+        self,
+        request,
+        executor_callback: Callable,
+        output_dtype: np.dtype,
+        logger,
+        tokenizer=None,
+        truncation_strategy=None,
+        max_model_len=None,
     ):
         self.triton_request = request
         self.executor_callback = executor_callback
         self.output_dtype = output_dtype
         self.logger = logger
+        self.tokenizer = tokenizer
+        self.truncation_strategy = truncation_strategy
+        self.max_model_len = max_model_len
         self.id = random_uuid()
         self.stream = False
         self.prepend_input = False
+
+    def _truncate_prompt(self, prompt: str):
+        if not self.tokenizer or not self.truncation_strategy or not self.max_model_len:
+            return prompt
+
+        # Tokenize
+        # We assume tokenizer is a PreTrainedTokenizer compatible object
+        tokens = self.tokenizer.encode(prompt)
+
+        if len(tokens) <= self.max_model_len:
+            return prompt
+
+        # Truncate
+        if self.truncation_strategy == "left":
+            tokens = tokens[-self.max_model_len :]
+        else:
+            # Default to right truncation (keep start)
+            tokens = tokens[: self.max_model_len]
+
+        return TokensPrompt(prompt_token_ids=tokens)
 
     @abstractmethod
     def _get_input_tensors(self):
@@ -110,8 +140,19 @@ class GenerateRequest(RequestBase):
         logger,
         lora_repository: Optional[Dict[str, str]] = None,
         supported_loras: Optional[List[str]] = None,
+        tokenizer=None,
+        truncation_strategy=None,
+        max_model_len=None,
     ):
-        super().__init__(request, executor_callback, output_dtype, logger)
+        super().__init__(
+            request,
+            executor_callback,
+            output_dtype,
+            logger,
+            tokenizer,
+            truncation_strategy,
+            max_model_len,
+        )
         # Attributes for generate requests
         if lora_repository is not None:
             self.lora_repository = lora_repository
@@ -125,6 +166,8 @@ class GenerateRequest(RequestBase):
         ).as_numpy()[0]
         if isinstance(prompt, bytes):
             prompt = prompt.decode("utf-8")
+
+        prompt = self._truncate_prompt(prompt)
 
         # image
         images = pb_utils.get_input_tensor_by_name(self.triton_request, "image")
@@ -336,9 +379,24 @@ class GenerateRequest(RequestBase):
 
 class EmbedRequest(RequestBase):
     def __init__(
-        self, request, executor_callback: Callable, output_dtype: np.dtype, logger
+        self,
+        request,
+        executor_callback: Callable,
+        output_dtype: np.dtype,
+        logger,
+        tokenizer=None,
+        truncation_strategy=None,
+        max_model_len=None,
     ):
-        super().__init__(request, executor_callback, output_dtype, logger)
+        super().__init__(
+            request,
+            executor_callback,
+            output_dtype,
+            logger,
+            tokenizer,
+            truncation_strategy,
+            max_model_len,
+        )
 
     def _get_input_tensors(self):
         embedding_request = pb_utils.get_input_tensor_by_name(
@@ -348,11 +406,22 @@ class EmbedRequest(RequestBase):
         # prompt
         prompt = embedding_request["input"]
         if isinstance(prompt, str):
-            pass  # do nothing
+            prompt = self._truncate_prompt(prompt)
         elif (
             isinstance(prompt, list) and len(prompt) > 0 and isinstance(prompt[0], int)
         ):
             # Single list of token IDs
+            # We can truncate this too if needed, but usually input IDs are already processed?
+            # If we want to enforce truncation:
+            if (
+                self.truncation_strategy
+                and self.max_model_len
+                and len(prompt) > self.max_model_len
+            ):
+                if self.truncation_strategy == "left":
+                    prompt = prompt[-self.max_model_len :]
+                else:
+                    prompt = prompt[: self.max_model_len]
             prompt = TokensPrompt(prompt_token_ids=prompt)
 
         # pooling_params
@@ -429,9 +498,24 @@ class EmbedRequest(RequestBase):
 
 class ScoreRequest(RequestBase):
     def __init__(
-        self, request, executor_callback: Callable, output_dtype: np.dtype, logger
+        self,
+        request,
+        executor_callback: Callable,
+        output_dtype: np.dtype,
+        logger,
+        tokenizer=None,
+        truncation_strategy=None,
+        max_model_len=None,
     ):
-        super().__init__(request, executor_callback, output_dtype, logger)
+        super().__init__(
+            request,
+            executor_callback,
+            output_dtype,
+            logger,
+            tokenizer,
+            truncation_strategy,
+            max_model_len,
+        )
 
     def _get_input_tensors(self):
         text_input = pb_utils.get_input_tensor_by_name(
@@ -474,23 +558,13 @@ class ScoreRequest(RequestBase):
             if len(query_input) != len(text_input):
                  raise ValueError(f"Query length {len(query_input)} does not match Text length {len(text_input)}")
             
-            # For score task, we construct prompts as pairs if possible, or concatenated strings
-            # vLLM engine.encode supports list of strings. 
-            # We will use a simple concatenation for now as a fallback, 
-            # but ideally this should use the model's specific format.
-            # Since we don't have access to the tokenizer here easily to apply chat template for pairs,
-            # we assume the user might have pre-formatted or we use a simple space join.
-            # TODO: Improve this to use proper chat template or pair handling if vLLM exposes it via python API easily.
             prompts = [f"{q} {t}" for q, t in zip(query_input, text_input)]
         else:
-            # If no query, it could be classify or reward
-            # We default to classify if not specified, but the caller (model.py) should have determined the task.
-            # However, PoolingParams needs the task.
-            # We'll assume 'classify' as a safe default for single-text non-generative tasks here,
-            # but we should probably allow passing the task type in __init__ or inferring it.
-            # For now, let's default to "classify".
             task = "classify"
             prompts = text_input
+
+        # Apply truncation
+        prompts = [self._truncate_prompt(p) for p in prompts]
 
         pooling_params = PoolingParams(task=task)
         
