@@ -79,6 +79,12 @@ class TritonPythonModel:
                 "optional": True,
             },
             {
+                "name": "correlation_id",
+                "data_type": "TYPE_STRING",
+                "dims": [1],
+                "optional": True,
+            },
+            {
                 "name": "stream",
                 "data_type": "TYPE_BOOL",
                 "dims": [1],
@@ -513,6 +519,16 @@ class TritonPythonModel:
         }
         self._ongoing_request_count += 1
         decrement_ongoing_request_count = True
+        
+        # Extract correlation_id
+        correlation_id_tensor = pb_utils.get_input_tensor_by_name(request, "correlation_id")
+        correlation_id = None
+        if correlation_id_tensor:
+            correlation_id = correlation_id_tensor.as_numpy()[0].decode("utf-8")
+        
+        if correlation_id:
+            self.logger.log_info(f"Processing request with correlation_id: {correlation_id}")
+
         try:
             request_task_name = self._validate_request_task_name(request)
             if request_task_name == "generate":
@@ -527,6 +543,7 @@ class TritonPythonModel:
                         tokenizer=self.tokenizer,
                         truncation_strategy=self.truncation_strategy,
                         max_model_len=self.max_model_len,
+                        correlation_id=correlation_id,
                     )
                 else:
                     request = GenerateRequest(
@@ -537,6 +554,7 @@ class TritonPythonModel:
                         tokenizer=self.tokenizer,
                         truncation_strategy=self.truncation_strategy,
                         max_model_len=self.max_model_len,
+                        correlation_id=correlation_id,
                     )
             elif request_task_name == "embed":
                 request = EmbedRequest(
@@ -547,6 +565,7 @@ class TritonPythonModel:
                     tokenizer=self.tokenizer,
                     truncation_strategy=self.truncation_strategy,
                     max_model_len=self.max_model_len,
+                    correlation_id=correlation_id,
                 )
             elif request_task_name in ["score", "classify", "reward"]:
                 request = ScoreRequest(
@@ -557,6 +576,7 @@ class TritonPythonModel:
                     tokenizer=self.tokenizer,
                     truncation_strategy=self.truncation_strategy,
                     max_model_len=self.max_model_len,
+                    correlation_id=correlation_id,
                 )
             else:
                 raise ValueError(
@@ -574,9 +594,9 @@ class TritonPythonModel:
                 if not request.stream:
                     is_cancelled = response_sender.is_cancelled()
                 if is_cancelled:
-                    self.logger.log_info("[vllm] Cancelling the request")
+                    self.logger.log_info(f"[vllm] Cancelling the request: {correlation_id if correlation_id else request.id}")
                     await self._llm_engine.abort(request.id)
-                    self.logger.log_info("[vllm] Successfully cancelled the request")
+                    self.logger.log_info(f"[vllm] Successfully cancelled the request: {correlation_id if correlation_id else request.id}")
 
                     if request.stream:
                         # Add cancelled final response to response loop.
@@ -627,7 +647,7 @@ class TritonPythonModel:
 
         except Exception as e:
             self.logger.log_error(
-                f"[vllm] Error generating stream: {traceback.format_exc()}"
+                f"[vllm] Error generating stream: {traceback.format_exc()} correlation_id: {correlation_id}"
             )
             error = pb_utils.TritonError(f"Error generating stream: {e}")
             text_output_tensor = pb_utils.Tensor(

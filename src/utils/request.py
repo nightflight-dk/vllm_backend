@@ -86,6 +86,7 @@ class RequestBase:
         tokenizer=None,
         truncation_strategy=None,
         max_model_len=None,
+        correlation_id=None,
     ):
         self.triton_request = request
         self.executor_callback = executor_callback
@@ -95,6 +96,7 @@ class RequestBase:
         self.truncation_strategy = truncation_strategy
         self.max_model_len = max_model_len
         self.id = random_uuid()
+        self.correlation_id = correlation_id
         self.stream = False
         self.prepend_input = False
 
@@ -143,6 +145,7 @@ class GenerateRequest(RequestBase):
         tokenizer=None,
         truncation_strategy=None,
         max_model_len=None,
+        correlation_id=None,
     ):
         super().__init__(
             request,
@@ -152,6 +155,7 @@ class GenerateRequest(RequestBase):
             tokenizer,
             truncation_strategy,
             max_model_len,
+            correlation_id,
         )
         # Attributes for generate requests
         if lora_repository is not None:
@@ -387,6 +391,7 @@ class EmbedRequest(RequestBase):
         tokenizer=None,
         truncation_strategy=None,
         max_model_len=None,
+        correlation_id=None,
     ):
         super().__init__(
             request,
@@ -396,6 +401,7 @@ class EmbedRequest(RequestBase):
             tokenizer,
             truncation_strategy,
             max_model_len,
+            correlation_id,
         )
 
     def _get_input_tensors(self):
@@ -506,6 +512,7 @@ class ScoreRequest(RequestBase):
         tokenizer=None,
         truncation_strategy=None,
         max_model_len=None,
+        correlation_id=None,
     ):
         super().__init__(
             request,
@@ -515,6 +522,7 @@ class ScoreRequest(RequestBase):
             tokenizer,
             truncation_strategy,
             max_model_len,
+            correlation_id,
         )
 
     def _get_input_tensors(self):
