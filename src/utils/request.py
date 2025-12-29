@@ -38,6 +38,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     EmbeddingOutput,
     EmbeddingRequestOutput,
+    PoolingOutput,
     PoolingRequestOutput,
     RequestOutput,
 )
@@ -45,6 +46,34 @@ from vllm.pooling_params import PoolingParams
 from vllm.utils import random_uuid
 
 from utils.vllm_backend_utils import TritonSamplingParams
+
+
+class RewardEmbeddingOutput:
+    """Hidden state output of the model for the reward task."""
+    embedding: List[float]
+
+    @staticmethod
+    def from_base(pooling_output: PoolingOutput):
+        if pooling_output.data[-1] is None:
+            raise ValueError("Pooling output is None")
+        pooled_data = pooling_output.data[-1]
+        return EmbeddingOutput(pooled_data.tolist())
+
+    @property
+    def hidden_size(self) -> int:
+        return len(self.embedding)
+
+
+class RewardRequestOutput(EmbeddingRequestOutput):
+    """Request output for the reward task."""
+    @staticmethod
+    def from_base(request_output: PoolingRequestOutput):
+        return RewardRequestOutput(
+            request_id=request_output.request_id,
+            outputs=RewardEmbeddingOutput.from_base(request_output.outputs),
+            prompt_token_ids=request_output.prompt_token_ids,
+            finished=request_output.finished,
+        )
 
 
 class RequestBase:
@@ -391,6 +420,161 @@ class EmbedRequest(RequestBase):
             )
 
         # For embeddings, num_output_tokens is 0 (no generation happened)
+        if self.additional_outputs["return_num_output_tokens"]:
+            output_tensors.append(
+                pb_utils.Tensor("num_output_tokens", np.asarray(0, dtype=np.uint32))
+            )
+
+        return pb_utils.InferenceResponse(output_tensors=output_tensors)
+
+class ScoreRequest(RequestBase):
+    def __init__(
+        self, request, executor_callback: Callable, output_dtype: np.dtype, logger
+    ):
+        super().__init__(request, executor_callback, output_dtype, logger)
+
+    def _get_input_tensors(self):
+        text_input = pb_utils.get_input_tensor_by_name(
+            self.triton_request, "text_input"
+        )
+        if text_input:
+            text_input = [t.decode("utf-8") for t in text_input.as_numpy()]
+        
+        query_input = pb_utils.get_input_tensor_by_name(
+            self.triton_request, "query_input"
+        )
+        if query_input:
+            query_input = [t.decode("utf-8") for t in query_input.as_numpy()]
+
+        # additional outputs
+        additional_outputs = {
+            "return_num_input_tokens": None,
+            "return_num_output_tokens": None,
+        }
+        for tensor_name in additional_outputs.keys():
+            tensor = pb_utils.get_input_tensor_by_name(self.triton_request, tensor_name)
+            if tensor:
+                tensor = bool(tensor.as_numpy()[0])
+            else:
+                tensor = False
+            additional_outputs[tensor_name] = tensor
+
+        return text_input, query_input, additional_outputs
+
+    async def execute(self):
+        text_input, query_input, self.additional_outputs = self._get_input_tensors()
+        
+        # Determine task and construct prompts
+        if query_input:
+            task = "score"
+            # Broadcast query if needed
+            if len(query_input) == 1 and len(text_input) > 1:
+                query_input = query_input * len(text_input)
+            
+            if len(query_input) != len(text_input):
+                 raise ValueError(f"Query length {len(query_input)} does not match Text length {len(text_input)}")
+            
+            # For score task, we construct prompts as pairs if possible, or concatenated strings
+            # vLLM engine.encode supports list of strings. 
+            # We will use a simple concatenation for now as a fallback, 
+            # but ideally this should use the model's specific format.
+            # Since we don't have access to the tokenizer here easily to apply chat template for pairs,
+            # we assume the user might have pre-formatted or we use a simple space join.
+            # TODO: Improve this to use proper chat template or pair handling if vLLM exposes it via python API easily.
+            prompts = [f"{q} {t}" for q, t in zip(query_input, text_input)]
+        else:
+            # If no query, it could be classify or reward
+            # We default to classify if not specified, but the caller (model.py) should have determined the task.
+            # However, PoolingParams needs the task.
+            # We'll assume 'classify' as a safe default for single-text non-generative tasks here,
+            # but we should probably allow passing the task type in __init__ or inferring it.
+            # For now, let's default to "classify".
+            task = "classify"
+            prompts = text_input
+
+        pooling_params = PoolingParams(task=task)
+        
+        response_iterator = self.executor_callback(prompts, pooling_params, self.id)
+        
+        async for response in response_iterator:
+            yield response
+
+    def create_response(self, request_output):
+        output_tensors = []
+        
+        # Extract data from PoolingRequestOutput
+        # outputs is a list of PoolingOutput
+        # We expect one output per request usually, but vLLM might batch?
+        # No, request_output corresponds to one request ID.
+        # But wait, we passed a list of prompts to executor_callback?
+        # If we passed a list of prompts, does it return one RequestOutput with multiple outputs?
+        # Or does it return multiple RequestOutputs?
+        # engine.encode with a list of prompts returns a RequestOutput object?
+        # No, engine.encode returns an AsyncIterator[RequestOutput].
+        # If we sent multiple prompts in one call, vLLM treats them as a batch?
+        # Actually, `engine.encode` signature is `prompts: List[str]`.
+        # It returns an iterator.
+        # The `RequestOutput` contains `outputs` which is `List[PoolingOutput]`.
+        # If we have multiple prompts, do we get multiple outputs in the list?
+        # Yes, `outputs` has length equal to number of prompts if we did a batch?
+        # No, usually `RequestOutput` is for a single sequence group.
+        # If we pass multiple prompts to `encode`, it might create multiple request objects internally?
+        # Wait, `AsyncLLMEngine.encode` takes `request_id`. One ID.
+        # So it treats the list of prompts as... what?
+        # If I pass multiple prompts, it might be for beam search? No, that's generate.
+        # For encode, it might be multiple sequences in one group?
+        
+        # Let's assume 1:1 mapping for now.
+        # If we have multiple text inputs, we might need to make multiple requests or handle the batching.
+        # But `TritonPythonModel` handles batching by receiving a batch of requests?
+        # No, `execute` receives a list of `requests`.
+        # `ScoreRequest` wraps ONE Triton request.
+        # One Triton request can contain a BATCH of inputs (text_input has dims [batch_size]).
+        # So `text_input` is a list of strings.
+        # We pass this list to `engine.encode`.
+        # Does `engine.encode` handle a list of prompts for a SINGLE request ID?
+        # Yes, it seems so.
+        
+        data = []
+        for output in request_output.outputs:
+            # output.data is the embedding/score
+            # It can be a list (embedding) or float (score)
+            if hasattr(output, 'data'):
+                 data.append(output.data)
+            else:
+                 data.append(None) # Should not happen
+
+        # Serialize
+        # If it's a list of arrays/lists, we can serialize to JSON
+        # or if it's a simple array, we can return it directly?
+        # The output type is TYPE_STRING (JSON) for text_output.
+        # So we dump to JSON.
+        
+        # We need to handle numpy arrays if data contains them
+        def default_serializer(obj):
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            return obj
+
+        json_str = json.dumps(data, default=default_serializer)
+        
+        output_tensors.append(
+            pb_utils.Tensor(
+                "text_output",
+                np.asarray([json_str], dtype=self.output_dtype),
+            )
+        )
+        
+        # num_input_tokens
+        if self.additional_outputs["return_num_input_tokens"]:
+            num_input_tokens = len(request_output.prompt_token_ids)
+            output_tensors.append(
+                pb_utils.Tensor(
+                    "num_input_tokens", np.asarray(num_input_tokens, dtype=np.uint32)
+                )
+            )
+
+        # num_output_tokens -> 0
         if self.additional_outputs["return_num_output_tokens"]:
             output_tensors.append(
                 pb_utils.Tensor("num_output_tokens", np.asarray(0, dtype=np.uint32))

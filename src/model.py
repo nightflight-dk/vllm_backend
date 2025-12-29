@@ -41,7 +41,8 @@ from vllm.entrypoints.openai.api_server import (
 )
 
 from utils.metrics import VllmStatLoggerFactory
-from utils.request import EmbedRequest, GenerateRequest
+from utils.request import EmbedRequest, GenerateRequest, ScoreRequest
+from utils.vllm_backend_utils import SupportedVLLMTask
 
 _VLLM_ENGINE_ARGS_FILENAME = "model.json"
 _MULTI_LORA_ARGS_FILENAME = "multi_lora.json"
@@ -423,14 +424,32 @@ class TritonPythonModel:
         embedding_request = pb_utils.get_input_tensor_by_name(
             request, "embedding_request"
         )
-        if embedding_request is None:
-            request_task_name = "generate"
-        else:
+        query_input = pb_utils.get_input_tensor_by_name(
+            request, "query_input"
+        )
+
+        if embedding_request is not None:
             request_task_name = "embed"
+        elif query_input is not None:
+            request_task_name = "score"
+        else:
+            # Infer task from supported tasks if not explicitly clear
+            if SupportedVLLMTask.GENERATE in self.supported_tasks:
+                request_task_name = "generate"
+            elif SupportedVLLMTask.CLASSIFY in self.supported_tasks:
+                request_task_name = "classify"
+            elif SupportedVLLMTask.REWARD in self.supported_tasks:
+                request_task_name = "reward"
+            elif SupportedVLLMTask.SCORE in self.supported_tasks:
+                request_task_name = "score"
+            elif SupportedVLLMTask.EMBED in self.supported_tasks:
+                request_task_name = "embed"
+            else:
+                request_task_name = "generate"
 
         if request_task_name not in self.supported_tasks:
             raise ValueError(
-                f"Model {self.args['model_name']} does not support '{request_task_name}' request"
+                f"Model {self.args['model_name']} does not support '{request_task_name}' request. Supported tasks: {self.supported_tasks}"
             )
 
         return request_task_name
@@ -478,6 +497,10 @@ class TritonPythonModel:
                     )
             elif request_task_name == "embed":
                 request = EmbedRequest(
+                    request, self._llm_engine.encode, self.output_dtype, self.logger
+                )
+            elif request_task_name in ["score", "classify", "reward"]:
+                request = ScoreRequest(
                     request, self._llm_engine.encode, self.output_dtype, self.logger
                 )
             else:

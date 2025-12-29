@@ -25,9 +25,22 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 import json
+from enum import Enum
 from typing import Optional
 
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+
+
+class SupportedVLLMTask(str, Enum):
+    """
+    Enum representing the supported tasks for the vLLM engine.
+    """
+    EMBED = "embed"
+    GENERATE = "generate"
+    REWARD = "reward"
+    CLASSIFY = "classify"
+    SCORE = "score"
+    AUTO = "auto"
 
 
 class TritonSamplingParams(SamplingParams):
